@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Oc.BinGrid.Infrastructure</RootNamespace>
+    <AssemblyName>Oc.BinGrid.Infrastructure</AssemblyName>
+    <AssemblyTitle></AssemblyTitle>
+  </PropertyGroup>
+
+  <ItemGroup>
+	  <PackageReference Include="Binance.Net" Version="12.11.3" />
+	  <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.5" />
+	  <PackageReference Include="SqlSugarCore" Version="5.1.4.214" />
+	  <PackageReference Include="Volo.Abp.Core" Version="10.2.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Domain\Domain.csproj" />
+  </ItemGroup>
+
+</Project>
