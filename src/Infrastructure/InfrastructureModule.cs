@@ -1,5 +1,7 @@
 ﻿using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Oc.BinGrid.Domain.Interfaces;
+using Oc.BinGrid.Infrastructure.Exchanges;
 using Oc.BinGrid.Infrastructure.Services;
 using SqlSugar;
 using Volo.Abp.Modularity;
@@ -11,6 +13,7 @@ namespace Oc.BinGrid.Infrastructure
         public override void ConfigureServices(ServiceConfigurationContext context)
         {
             var configuration = context.Services.GetConfiguration();
+
 
             // 注入 SqlSugar
             context.Services.AddSingleton<ISqlSugarClient>(s =>
@@ -25,6 +28,8 @@ namespace Oc.BinGrid.Infrastructure
                     InitKeyType = InitKeyType.Attribute
                 });
             });
+
+            context.Services.AddTransient<IMarketGateway, BinanceGateway>();
 
             // 后台保存数据入库服务
             context.Services.AddHostedService<PersistenceWorker>();

@@ -1,12 +1,12 @@
 ﻿using Microsoft.Extensions.Logging;
-using Oc.BinGrid.Entities;
+using Oc.BinGrid.Domain.Entities;
+using Oc.BinGrid.Domain.Interfaces;
 using Volo.Abp.DependencyInjection;
 
-namespace Oc.BinGrid.Managers
+namespace Oc.BinGrid.Engine.Managers
 {
     public class BalanceSnapshotManager : ITransientDependency
     {
-
         private readonly ILogger<BalanceSnapshotManager> _logger;
         private readonly IRepository<BalanceSnapshot, long> _balanceRepo;
 
@@ -18,10 +18,17 @@ namespace Oc.BinGrid.Managers
             _balanceRepo = balanceRepo;
         }
 
-        public async Task<BalanceSnapshot?> GetBalanceAsync()
+        public async Task<BalanceSnapshot?> GetLatestAsync()
         {
-            var list = await _balanceRepo.GetPagedListAsync(0, 1, "SnapshotTime DESC", true);
-            return list.FirstOrDefault();
+            var list = await _balanceRepo.GetListAsync();
+            var latest = list.OrderByDescending(x => x.SnapshotTime).FirstOrDefault();
+            _logger.LogDebug("Latest balance snapshot: {Snapshot}", latest);
+            return latest;
+        }
+
+        public Task<bool> SaveAsync(BalanceSnapshot snapshot)
+        {
+            return _balanceRepo.InsertAsync(snapshot);
         }
     }
 }

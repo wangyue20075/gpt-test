@@ -1,4 +1,5 @@
-﻿using Oc.BinGrid.Domain.Entities;
+﻿using System.Text.Json;
+using Oc.BinGrid.Domain.Entities;
 using Oc.BinGrid.Domain.Enums;
 using Oc.BinGrid.Domain.Interfaces;
 using Volo.Abp.DependencyInjection;
@@ -9,67 +10,89 @@ namespace Oc.BinGrid.Engine.Strategies.Grid
     {
         private readonly GridConfig _config;
         private readonly IMarketGateway _gateway;
-        private readonly IPositionRepository _posRepo;
         private readonly IOrderRepository _orderRepo;
+        private readonly IGridConfigRepository _configRepo;
 
         public GridManager(
             GridConfig config,
             IMarketGateway gateway,
-            IPositionRepository posRepo,
-            IOrderRepository orderRepo)
+            IOrderRepository orderRepo,
+            IGridConfigRepository configRepo)
         {
             _config = config;
             _gateway = gateway;
-            _posRepo = posRepo;
             _orderRepo = orderRepo;
+            _configRepo = configRepo;
         }
 
-        /// <summary>
-        /// 核心逻辑：处理每一个价格变动
-        /// </summary>
         public async Task ExecuteTickAsync(decimal currentPrice)
         {
-            // 1. 更新价格追踪极值
             _config.TrackedHigh = Math.Max(_config.TrackedHigh, currentPrice);
             _config.TrackedLow = _config.TrackedLow == 0 ? currentPrice : Math.Min(_config.TrackedLow, currentPrice);
 
-            // 2. 检查下跌反弹 (买入/补仓逻辑)
-            if (currentPrice >= _config.BasePrice * (1 - _config.DownThreshold))
+            if (ShouldOpenLong(currentPrice))
             {
-                // 检查是否从低点反弹了指定的比例
-                decimal reboundPrice = _config.TrackedLow * (1 + (_config.DownRebound ?? 0));
-                if (currentPrice >= reboundPrice && _config.TrackedLow < _config.BasePrice)
-                {
-                    await FireOrderAsync(OrderAction.OpenLong, currentPrice);
-                }
+                await FireOrderAsync(OrderAction.OpenLong, currentPrice);
+                return;
             }
 
-            // 3. 检查上涨回落 (卖出/减仓逻辑)
-            if (currentPrice <= _config.BasePrice * (1 + _config.UpThreshold))
+            if (ShouldCloseLong(currentPrice))
             {
-                decimal retracementPrice = _config.TrackedHigh * (1 - (_config.UpRetracement ?? 0));
-                if (currentPrice <= retracementPrice && _config.TrackedHigh > _config.BasePrice)
-                {
-                    await FireOrderAsync(OrderAction.CloseLong, currentPrice);
-                }
+                await FireOrderAsync(OrderAction.CloseLong, currentPrice);
             }
+        }
+
+        private bool ShouldOpenLong(decimal currentPrice)
+        {
+            var reboundPrice = _config.TrackedLow * (1 + (_config.DownRebound ?? 0));
+            return currentPrice <= _config.BasePrice * (1 - _config.DownThreshold)
+                   && currentPrice >= reboundPrice
+                   && _config.TrackedLow < _config.BasePrice;
+        }
+
+        private bool ShouldCloseLong(decimal currentPrice)
+        {
+            var retracementPrice = _config.TrackedHigh * (1 - (_config.UpRetracement ?? 0));
+            return currentPrice >= _config.BasePrice * (1 + _config.UpThreshold)
+                   && currentPrice <= retracementPrice
+                   && _config.TrackedHigh > _config.BasePrice;
         }
 
         private async Task FireOrderAsync(OrderAction action, decimal price)
         {
-            // 创建订单实体
             var order = new EaOrder(_config.Name, _config.Symbol, _config.Market, action, price, _config.TradeAmount, OrderType.Market);
 
-            // 发送订单
             var resp = await _gateway.PlaceOrderAsync(order);
-            if (resp.Success)
+            var exchangeOrderId = TryGetExchangeOrderId(resp);
+            if (exchangeOrderId <= 0)
             {
-                order.MarkSubmitted(resp.ExchangeOrderId ?? 0);
-
-                // 更新网格状态并入库
-                _config.UpdateStateAfterTrade(price);
-                await _orderRepo.SaveAsync(order);
+                return;
             }
+
+            order.MarkSubmitted(exchangeOrderId);
+            await _orderRepo.SaveAsync(order);
+
+            _config.UpdateStateAfterTrade(price);
+            await _configRepo.SaveConfigAsync(_config);
+        }
+
+        private static long TryGetExchangeOrderId(object response)
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(response);
+                using var doc = JsonDocument.Parse(json);
+                if (doc.RootElement.TryGetProperty("ExchangeOrderId", out var exchangeIdProp))
+                {
+                    return exchangeIdProp.GetInt64();
+                }
+            }
+            catch
+            {
+                // ignored
+            }
+
+            return 0;
         }
     }
 }
