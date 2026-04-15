@@ -3,12 +3,11 @@
 namespace Oc.BinGrid.Domain.Interfaces
 {
     /// <summary>
-    /// 订单仓储：记录所有 EaOrder 的历史与状态
+    /// 订单仓储接口
     /// </summary>
     public interface IOrderRepository
     {
-        Task SaveAsync(EaOrder order);
-        Task<EaOrder?> GetByExchangeIdAsync(long exchangeOrderId);
-        Task<List<EaOrder>> GetActiveOrdersAsync(string strategyName);
+        Task InsertAsync(TradeOrder order);
+        Task<List<TradeOrder>> GetRecentOrdersAsync(int count);
     }
 }

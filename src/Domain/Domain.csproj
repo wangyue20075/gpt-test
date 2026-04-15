@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <RootNamespace>Oc.BinGrid.Domain</RootNamespace>
     <AssemblyName>Oc.BinGrid.Domain</AssemblyName>
@@ -10,6 +10,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Folder Include="Events\" />
+    <ProjectReference Include="..\Core\Core.csproj" />
   </ItemGroup>
 </Project>

@@ -1,31 +1,32 @@
 ﻿using Oc.BinGrid.Domain.Entities;
-using Oc.BinGrid.Domain.Enums;
 using Oc.BinGrid.Domain.Interfaces;
+using Oc.BinGrid.Infrastructure.Db;
 using SqlSugar;
-using Volo.Abp.DependencyInjection;
 
 namespace Oc.BinGrid.Infrastructure.Repositories
 {
-    public class PositionRepository : IPositionRepository, ITransientDependency
+    public class PositionRepository : IPositionRepository
     {
         private readonly ISqlSugarClient _db;
 
-        public PositionRepository(ISqlSugarClient db)
+        public PositionRepository(SqlSugarContext context)
         {
-            _db = db;
+            _db = context.Db;
         }
 
-        public async Task UpdateAsync(EaPosition position)
+        public Task<List<Position>> GetAllActiveAsync()
         {
-            var storage = _db.Storageable(new List<EaPosition> { position }).ToStorage();
-            await storage.AsInsertable.ExecuteCommandAsync();
-            await storage.AsUpdateable.ExecuteCommandAsync();
+            throw new NotImplementedException();
         }
 
-        public Task<EaPosition?> GetPositionAsync(string strategyName, string symbol, PositionSide side)
+        public Task<Position> GetBySymbolAsync(string symbol)
         {
-            return _db.Queryable<EaPosition>()
-                .FirstAsync(x => x.StrategyName == strategyName && x.Symbol == symbol && x.Side == side);
+            throw new NotImplementedException();
+        }
+
+        public Task UpdateAsync(Position position)
+        {
+            throw new NotImplementedException();
         }
     }
 }

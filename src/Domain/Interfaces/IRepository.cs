@@ -1,4 +1,4 @@
-﻿using Oc.BinGrid.Domain.Values;
+﻿using Oc.BinGrid.Core.Common;
 using System.Linq.Expressions;
 
 namespace Oc.BinGrid.Domain.Interfaces
@@ -14,7 +14,7 @@ namespace Oc.BinGrid.Domain.Interfaces
         Task<T?> GetFirstAsync(Expression<Func<T, bool>> predicate);
         Task<List<T>> GetListAsync();
         Task<List<T>> GetListAsync(Expression<Func<T, bool>> predicate);
-        Task<List<T>> GetPageListAsync(Expression<Func<T, bool>> predicate, PageModel page);
+        Task<List<T>> GetPageListAsync(Expression<Func<T, bool>> predicate, PageRequest page);
 
         // --- 插入 ---
         Task<bool> InsertAsync(T entity);

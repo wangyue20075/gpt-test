@@ -1,4 +1,5 @@
-﻿using Oc.BinGrid.Domain.Interfaces;
+﻿using Oc.BinGrid.Core.Common;
+using Oc.BinGrid.Domain.Interfaces;
 using SqlSugar;
 using System.Linq.Expressions;
 using Volo.Abp.DependencyInjection;
@@ -28,7 +29,7 @@ namespace Oc.BinGrid.Infrastructure.Repositories
         public virtual async Task<List<T>> GetListAsync(Expression<Func<T, bool>> predicate) =>
             await _db.Queryable<T>().Where(predicate).ToListAsync();
 
-        public virtual async Task<List<T>> GetPageListAsync(Expression<Func<T, bool>> predicate, Domain.Values.PageModel page)
+        public virtual async Task<List<T>> GetPageListAsync(Expression<Func<T, bool>> predicate, PageRequest page)
         {
             RefAsync<int> totalCount = 0;
             var list = await _db.Queryable<T>()

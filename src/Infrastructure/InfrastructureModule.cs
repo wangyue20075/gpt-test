@@ -1,9 +1,10 @@
-﻿using Microsoft.Extensions.Configuration;
+﻿using Flurl.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Oc.BinGrid.Domain.Interfaces;
+using Oc.BinGrid.Infrastructure.Db;
 using Oc.BinGrid.Infrastructure.Exchanges;
-using Oc.BinGrid.Infrastructure.Services;
-using SqlSugar;
+using Oc.BinGrid.Infrastructure.Repositories;
+using Volo.Abp;
 using Volo.Abp.Modularity;
 
 namespace Oc.BinGrid.Infrastructure
@@ -12,27 +13,33 @@ namespace Oc.BinGrid.Infrastructure
     {
         public override void ConfigureServices(ServiceConfigurationContext context)
         {
-            var configuration = context.Services.GetConfiguration();
-
-
-            // 注入 SqlSugar
-            context.Services.AddSingleton<ISqlSugarClient>(s =>
-            {
-                var connStr = configuration.GetConnectionString("Default");
-
-                return new SqlSugarClient(new ConnectionConfig()
+            // 配置 Flurl 使用 System.Text.Json 并处理精度（可选）
+            FlurlHttp.Clients.WithDefaults(builder => builder
+                .WithSettings(settings =>
                 {
-                    ConnectionString = connStr,
-                    DbType = DbType.Sqlite,
-                    IsAutoCloseConnection = true,
-                    InitKeyType = InitKeyType.Attribute
-                });
-            });
+                    // 这里可以配置全局超时、头信息等
+                    settings.Timeout = TimeSpan.FromSeconds(10);
+                }));
 
-            context.Services.AddTransient<IMarketGateway, BinanceGateway>();
 
-            // 后台保存数据入库服务
-            context.Services.AddHostedService<PersistenceWorker>();
+            // 1. 注册上下文（单例）
+            context.Services.AddSingleton<SqlSugarContext>();
+
+            // 2. 注册具体仓储
+            context.Services.AddTransient<IPositionRepository, PositionRepository>();
+            context.Services.AddTransient<IOrderRepository, OrderRepository>();
+
+            // 注册网关
+            context.Services.AddTransient<IExchangeGateway, BinanceGateway>();
+        }
+
+        public override void OnApplicationInitialization(ApplicationInitializationContext context)
+        {
+            // 在程序启动后执行数据库初始化
+            var dbContext = context.ServiceProvider.GetRequiredService<SqlSugarContext>();
+#if DEBUG
+            dbContext.InitDb();
+#endif
         }
     }
 }
