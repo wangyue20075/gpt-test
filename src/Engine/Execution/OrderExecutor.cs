@@ -1,8 +1,4 @@
-﻿using Oc.BinGrid.Domain.Aggregates.Strategy;
-using Oc.BinGrid.Domain.Interfaces;
-using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using Oc.BinGrid.Domain.Interfaces;
 
 namespace Oc.BinGrid.Engine.Executors
 {
@@ -15,7 +11,7 @@ namespace Oc.BinGrid.Engine.Executors
             _exchange = exchange;
         }
 
-        public async Task ExecuteAsync(StrategySignal signal)
+        public async Task ExecuteAsync()
         {
            
                 

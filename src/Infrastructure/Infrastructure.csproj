@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <RootNamespace>Oc.BinGrid.Infrastructure</RootNamespace>
     <AssemblyName>Oc.BinGrid.Infrastructure</AssemblyName>
@@ -16,9 +16,5 @@
   <ItemGroup>
     <ProjectReference Include="..\Core\Core.csproj" />
     <ProjectReference Include="..\Domain\Domain.csproj" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Folder Include="Messaging\" />
   </ItemGroup>
 </Project>

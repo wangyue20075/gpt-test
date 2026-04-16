@@ -5,78 +5,83 @@ using Oc.BinGrid.Domain.Values;
 namespace Oc.BinGrid.Domain.Interfaces
 {
     /// <summary>
-    /// 交易所网关接口：屏蔽不同交易所 API 差异
+    /// 交易所网关接口：提供统一的底层通讯抽象，解耦具体交易所实现
     /// </summary>
     public interface IExchangeGateway
     {
         #region 1. 行情数据 (Market Data)
 
         /// <summary>
-        /// 获取单个交易对的最新价格 (轮询模式使用)
+        /// 获取最新深度/价格 (用于冷启动或轮询)
         /// </summary>
         Task<TickData> GetLatestTickAsync(string symbol);
 
         /// <summary>
-        /// 获取 K 线数据 (用于计算技术指标如 MA, RSI)
+        /// 获取历史 K 线
         /// </summary>
         Task<List<KlineData>> GetKlinesAsync(string symbol, string interval, int limit = 100);
 
         #endregion
 
-        #region 2. 资产与仓位 (Account & Position)
+        #region 2. 账户与资产 (Account & Asset)
 
         /// <summary>
-        /// 获取账户余额 (如 USDT)
+        /// 获取可用余额
         /// </summary>
         Task<AssetBalance> GetBalanceAsync(string asset);
 
         /// <summary>
-        /// 获取当前活跃仓位 (多仓或空仓)
+        /// 从交易所拉取所有当前挂单 (用于对账恢复)
         /// </summary>
-        Task<List<Position>> GetPositionsAsync(string symbol = null);
+        Task<List<OrderResponse>> GetOpenOrdersAsync(string symbol);
 
         #endregion
 
         #region 3. 交易执行 (Trade Execution)
 
         /// <summary>
-        /// 下限价单 (网格策略常用)
+        /// 下限价单
         /// </summary>
         /// <param name="symbol">交易对</param>
-        /// <param name="side">BUY / SELL</param>
+        /// <param name="side">BUY/SELL</param>
         /// <param name="price">价格</param>
         /// <param name="quantity">数量</param>
-        /// <returns>返回标准化的订单实体</returns>
-        Task<TradeOrder> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity);
+        /// <param name="clientOrderId">自定义ID，用于幂等和追踪</param>
+        Task<OrderResponse?> PlaceLimitOrderAsync(string symbol, string side, decimal price, decimal quantity, string? clientOrderId = null);
 
         /// <summary>
-        /// 下市价单 (止损或紧急平仓常用)
+        /// 下市价单
         /// </summary>
-        Task<TradeOrder> PlaceMarketOrderAsync(string symbol, string side, decimal quantity);
+        Task<OrderResponse?> PlaceMarketOrderAsync(string symbol, string side, decimal quantity, string? clientOrderId = null);
 
         /// <summary>
-        /// 撤销单个订单
+        /// 查询订单详情
+        /// </summary>
+        Task<OrderResponse?> GetOrderAsync(string symbol, string orderId);
+
+        /// <summary>
+        /// 撤销订单
         /// </summary>
         Task<bool> CancelOrderAsync(string symbol, string orderId);
 
-        /// <summary>
-        /// 获取订单当前状态
-        /// </summary>
-        Task<TradeOrder> GetOrderAsync(string symbol, string orderId);
-
         #endregion
 
-        #region 4. 实时监听 (Stream / WebSocket)
+        #region 4. 推送订阅 (Streaming)
 
         /// <summary>
-        /// 开启 WebSocket 价格推送 (由外部 Worker 调用)
+        /// 订阅行情流
         /// </summary>
-        void SubscribeTickStream(string symbol, Action<TickData> onTick);
+        Task SubscribeSymbolTickerAsync(IEnumerable<string> symbols, Func<TickData, Task> onTick);
 
         /// <summary>
-        /// 开启 订单状态/余额变动 推送
+        /// 订阅私有数据流 (订单更新、余额变动)
         /// </summary>
-        void SubscribeUserDataStream(Action<TradeOrder> onOrderUpdate, Action<AssetBalance> onBalanceUpdate);
+        Task SubscribeUserDataAsync(Func<OrderResponse, Task> onOrderUpdate, Func<AssetBalance, Task> onBalanceUpdate);
+
+        /// <summary>
+        /// 停止所有订阅并关闭连接
+        /// </summary>
+        Task UnsubscribeAllAsync();
 
         #endregion
     }

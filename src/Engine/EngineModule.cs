@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Oc.BinGrid.Core.Abstractions;
 using Oc.BinGrid.Domain;
 using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Domain.ValueObjects;
@@ -32,11 +33,12 @@ namespace Oc.BinGrid.Engine
             context.Services.AddSingleton<StrategyBase>(sp =>
             {
                 return new GridStrategy(
+                    sp.GetRequiredService<ILogger<GridStrategy>>(),
                     btcGrid,
                     sp.GetRequiredService<IExchangeGateway>(),
                     sp.GetRequiredService<IOrderRepository>(),
-                    sp.GetRequiredService<IOrderMonitorService>(),
-                    sp.GetRequiredService<ILogger<GridStrategy>>()
+                    sp.GetRequiredService<IPersistenceChannel>(),
+                    sp.GetRequiredService<IOrderMonitorService>()
                 );
             });
         }

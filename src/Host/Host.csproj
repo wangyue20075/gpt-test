@@ -32,5 +32,6 @@
 
   <ItemGroup>
     <Folder Include="Data\" />
+    <Folder Include="Logs\" />
   </ItemGroup>
 </Project>

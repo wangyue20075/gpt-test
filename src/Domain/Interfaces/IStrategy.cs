@@ -1,12 +1,12 @@
-﻿using Oc.BinGrid.Domain.ValueObjects;
-using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using Oc.BinGrid.Domain.Enums;
+using Oc.BinGrid.Domain.ValueObjects;
+using Oc.BinGrid.Domain.Values;
 
 namespace Oc.BinGrid.Domain.Interfaces
 {
     /// <summary>
-    /// 策略核心契约，定义了外部组件（如监控服务）如何与策略交互
+    /// 策略核心契约
+    /// 定义 Engine 或 StrategySupervisor 如何与策略交互
     /// </summary>
     public interface IStrategy
     {
@@ -26,15 +26,43 @@ namespace Oc.BinGrid.Domain.Interfaces
         string Symbol { get; }
 
         /// <summary>
-        /// 订单状态更新回调
-        /// 当交易所推送成交、或监控服务执行撤单后，通过此接口撞回策略逻辑
+        /// 当前运行状态
         /// </summary>
-        /// <param name="order">标准化的订单响应对象</param>
+        StrategyState State { get; }
+
+        /// <summary>
+        /// 已处理 Tick 数量
+        /// </summary>
+        long TotalTicksProcessed { get; }
+
+        /// <summary>
+        /// 最后一次 Tick 时间
+        /// </summary>
+        DateTime? LastTickTime { get; }
+
+        /// <summary>
+        /// 启动策略（加载状态、恢复订单等）
+        /// </summary>
+        Task StartAsync();
+
+        /// <summary>
+        /// 停止策略（安全停机）
+        /// </summary>
+        Task StopAsync();
+
+        /// <summary>
+        /// 行情驱动入口
+        /// </summary>
+        Task OnTickAsync(TickData tick);
+
+        /// <summary>
+        /// 订单状态更新回调
+        /// </summary>
         Task OnOrderUpdateAsync(OrderResponse order);
 
         /// <summary>
-        /// 恢复逻辑：用于系统重启后重新绑定活跃订单
+        /// 系统启动后恢复状态
         /// </summary>
-        void RestoreActiveOrder(string orderId);
+        Task RestoreAsync();
     }
 }

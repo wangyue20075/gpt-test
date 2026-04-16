@@ -21,14 +21,22 @@ namespace Oc.BinGrid.Infrastructure.Db
                     // 核心：外部配置映射，解决 Domain 层不引用 SqlSugar 的问题
                     EntityService = (prop, column) =>
                     {
-                        // 1. 统一主键约定：属性名为 Id 的自动设为主键
+                        // 1. 统一主键约定
                         if (prop.Name.Equals("Id", StringComparison.OrdinalIgnoreCase))
                         {
                             column.IsPrimarykey = true;
-                            column.IsIdentity = true;
+                            // 🚀 修改点：如果属性是字符串，则禁止自增标识
+                            if (prop.PropertyType == typeof(int) || prop.PropertyType == typeof(long))
+                            {
+                                column.IsIdentity = true;
+                            }
+                            else
+                            {
+                                column.IsIdentity = false;
+                            }
                         }
 
-                        // 2. 精度处理：量化交易必须保证 decimal 不丢失精度
+                        // 2. 精度处理
                         if (prop.PropertyType == typeof(decimal) || prop.PropertyType == typeof(decimal?))
                         {
                             column.DataType = "decimal(18, 8)";
@@ -50,11 +58,11 @@ namespace Oc.BinGrid.Infrastructure.Db
             // 2. CodeFirst 检查并创建表
             // 注意：这里手动指定所有需要生成的领域实体
             Db.CodeFirst.InitTables(
-                typeof(Position)
-                //typeof(TradeOrder)
-                //typeof(AssetBalance),
-                //typeof(StrategyConfig),
-                //typeof(TradeLog)
+                typeof(GridPosition),
+                typeof(TradeOrder),
+                typeof(AssetBalance)
+            //typeof(StrategyConfig),
+            //typeof(TradeLog)
             );
         }
     }

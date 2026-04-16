@@ -1,5 +1,5 @@
 ﻿using Microsoft.Extensions.Logging;
-using Oc.BinGrid.Domain.Entities;
+using Oc.BinGrid.Core.Abstractions;
 using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Domain.ValueObjects;
 using Oc.BinGrid.Domain.Values;
@@ -23,12 +23,14 @@ namespace Oc.BinGrid.Engine.Strategies.Grid
         public override string Symbol => _setting.Symbol;
 
         public GridStrategy(
+            ILogger<GridStrategy> logger,
             GridSetting setting,
             IExchangeGateway gateway,
             IOrderRepository orderRepo,
-            IOrderMonitorService monitor,
-            ILogger<GridStrategy> logger)
-            : base(gateway, orderRepo, logger)
+            IPersistenceChannel persistenceChannel,
+            IOrderMonitorService monitor
+            )
+            : base(logger, gateway, orderRepo, persistenceChannel)
         {
             _setting = setting;
             _monitor = monitor;
@@ -39,13 +41,13 @@ namespace Oc.BinGrid.Engine.Strategies.Grid
         protected override async Task HandleTickAsync(TickData tick)
         {
             // 如果当前有正在处理的挂单，则静默等待，不进入新逻辑
-            if (ActiveOrderId.IsNullOrEmpty()) return;
+            if (GetActiveOrders().Any()) return;
 
             // 1. 优先处理平仓逻辑（止盈）
             await HandleExitLogic(tick);
 
-            // 2. 处理开仓逻辑（补仓）
-            if (!ActiveOrderId.IsNullOrEmpty()) // 平仓可能刚发了单，需再次检查锁
+            // 2. 处理开仓逻辑（只有平仓没发单的情况下才查开仓）
+            if (!GetActiveOrders().Any())
             {
                 await HandleEntryLogic(tick);
             }
@@ -54,7 +56,7 @@ namespace Oc.BinGrid.Engine.Strategies.Grid
         /// <summary>
         /// 核心逻辑：当订单状态改变（成交/撤销）时，由基类回调此方法
         /// </summary>
-        protected override async Task HandleOrderActionAsync(OrderResponse order)
+        protected override async Task HandleOrderUpdateAsync(OrderResponse order)
         {
             if (order.Status == "FILLED")
             {
@@ -145,14 +147,18 @@ namespace Oc.BinGrid.Engine.Strategies.Grid
 
         private async Task PlaceGridOrderAsync(string side, decimal price)
         {
-            Logger.LogInformation("🚀 尝试发送 {Side} 限价单: {Price}", side, price);
+            if (ActiveOrders.Any()) return;
+
+            Logger.LogInformation("🚀 发送 {Side} 限价单: {Price} | Symbol: {Symbol}", side, price, Symbol);
 
             var order = await Gateway.PlaceLimitOrderAsync(Symbol, side, price, _setting.QuantityPerGrid);
 
             if (order != null)
             {
+                var orderEntity = MapToEntity(order);
+
                 // 1. 设置基类锁，防止重入
-                ActiveOrderId = order.OrderId;
+                ActiveOrders.TryAdd(order.OrderId, orderEntity);   
 
                 // 2. 注册到监控服务 (超时或价格跑太远则撤单)
                 _monitor.Watch(new OrderWatchTask

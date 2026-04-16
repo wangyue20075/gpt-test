@@ -1,69 +1,105 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using CryptoExchange.Net.Interfaces;
+using Microsoft.Extensions.Logging;
+using Oc.BinGrid.Core.Abstractions;
+using Oc.BinGrid.Domain.Entities;
+using Oc.BinGrid.Domain.Enums;
 using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Domain.ValueObjects;
 using Oc.BinGrid.Domain.Values;
+using System.Collections.Concurrent;
 
 namespace Oc.BinGrid.Engine.Strategies
 {
+    /// <summary>
+    /// 策略基类（线程安全 + 生命周期可控 + 多订单支持）
+    /// </summary>
     public abstract class StrategyBase : IStrategy
     {
+        protected readonly ILogger Logger;
         protected readonly IExchangeGateway Gateway;
         protected readonly IOrderRepository OrderRepo;
-        protected readonly ILogger Logger;
+        protected readonly IPersistenceChannel PersistenceChannel;
 
-        // 策略基本属性
-        public string Id { get; protected init; } = Guid.NewGuid().ToString("N");
+        private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
+        private int _exceptionCount;
+        private const int MaxExceptionTolerance = 10;
+
+        private StrategyState _state = StrategyState.Initializing;
+
+        protected readonly ConcurrentDictionary<string, TradeOrder> ActiveOrders = new();
+
+        public string Id { get; protected init; } = Guid.NewGuid().ToString("N")[..8];
         public string Name { get; protected init; }
         public abstract string Symbol { get; }
-        public bool IsEnabled { get; set; } = false;
 
-        // 运行状态监控
+        public StrategyState State => _state;
+        public long TotalTicksProcessed { get; set; }
         public DateTime? LastTickTime { get; private set; }
-        public long TotalTicksProcessed { get; private set; }
-
-        public string ActiveOrderId { get; protected set; }
 
         protected StrategyBase(
+            ILogger logger,
             IExchangeGateway gateway,
             IOrderRepository orderRepo,
-            ILogger logger)
+            IPersistenceChannel persistenceChannel
+            )
         {
+            Logger = logger;
             Gateway = gateway;
             OrderRepo = orderRepo;
-            Logger = logger;
+            PersistenceChannel = persistenceChannel;
             Name = GetType().Name;
         }
 
         #region 生命周期管理
 
-        /// <summary>
-        /// 策略启动前的初始化逻辑（如恢复挂单、计算指标初始值）
-        /// </summary>
-        public virtual async Task InitializeAsync()
+        public async Task StartAsync()
         {
-            Logger.LogInformation("策略 {Name} ({Id}) 启动初始化...", Name, Id);
-            // 子类可在此处加载缓存、初始化技术指标等
-            IsEnabled = true;
-            await Task.CompletedTask;
+            await _lifecycleLock.WaitAsync();
+            try
+            {
+                if (_state == StrategyState.Running)
+                    return;
+
+                _state = StrategyState.Initializing;
+                Logger.LogInformation("策略 {Name} 启动中...", Name);
+
+                await RestoreAsync();
+                await OnStartedAsync();
+
+                _state = StrategyState.Running;
+
+                Logger.LogInformation("策略 {Name} 已启动。", Name);
+            }
+            catch (Exception ex)
+            {
+                _state = StrategyState.Faulted;
+                Logger.LogCritical(ex, "策略 {Name} 启动失败。", Name);
+                throw;
+            }
+            finally
+            {
+                _lifecycleLock.Release();
+            }
         }
 
-        /// <summary>
-        /// 策略停止时的清理逻辑
-        /// </summary>
-        public virtual async Task StopAsync()
+        public async Task StopAsync()
         {
-            IsEnabled = false;
-            Logger.LogWarning("策略 {Name} 已停止接收行情。", Name);
-            await Task.CompletedTask;
-        }
+            await _lifecycleLock.WaitAsync();
+            try
+            {
+                if (_state != StrategyState.Running)
+                    return;
 
-        /// <summary>
-        /// 实现恢复逻辑：系统重启后重新绑定挂单 ID
-        /// </summary>
-        public virtual void RestoreActiveOrder(string orderId)
-        {
-            // ActiveOrderId = orderId;
-            Logger.LogInformation("策略 {Name} 恢复挂单绑定: {OrderId}", Name, orderId);
+                _state = StrategyState.Stopped;
+
+                await OnStoppingAsync();
+
+                Logger.LogWarning("策略 {Name} 已停止。", Name);
+            }
+            finally
+            {
+                _lifecycleLock.Release();
+            }
         }
 
         #endregion
@@ -71,79 +107,93 @@ namespace Oc.BinGrid.Engine.Strategies
         #region 核心事件驱动
 
         /// <summary>
-        /// 核心勾子：处理 Tick 数据
+        /// 行情驱动
         /// </summary>
         public async Task OnTickAsync(TickData tick)
         {
-            if (!IsEnabled || tick.Symbol != Symbol) return;
+            if (_state != StrategyState.Running)
+                return;
+
+            if (tick.Symbol != Symbol)
+                return;
 
             try
             {
-                LastTickTime = DateTime.Now;
+                LastTickTime = DateTime.UtcNow;
                 TotalTicksProcessed++;
 
                 await HandleTickAsync(tick);
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "策略 {Name} 处理 Tick 异常: {Symbol} @ {Price}", Name, tick.Symbol, tick.Price);
-                // 可以在此处实现风险控制：比如异常超过 N 次自动停机
+                HandleStrategyException(ex);
             }
         }
 
         /// <summary>
-        /// 统一订单更新处理
+        /// 订单更新
         /// </summary>
-        public virtual async Task OnOrderUpdateAsync(OrderResponse updatedOrder)
+        public async Task OnOrderUpdateAsync(OrderResponse response)
         {
-            // 1. 全局持久化更新（更新数据库中的订单状态）
-            //await OrderRepo.UpdateStatusAsync(updatedOrder.OrderId, updatedOrder.Status, updatedOrder.ExecutedPrice);
-
-            // 2. 状态锁释放：如果是本策略关注的订单，且已到达终态，解锁
-            //if (ActiveOrderId.HasValue && updatedOrder.OrderId == ActiveOrderId.Value)
-            //{
-            //    if (IsFinalStatus(updatedOrder.Status))
-            //    {
-            //        Logger.LogDebug("策略 {Name} 活跃订单 {Id} 已结束状态: {Status}，解锁状态位。", Name, updatedOrder.OrderId, updatedOrder.Status);
-            //        ActiveOrderId = null;
-            //    }
-            //}
-
-            // 2. 全局日志
-            Logger.LogInformation("策略 {Name} 收到订单更新: {Id} | 状态: {Status}", Name, updatedOrder.OrderId, updatedOrder.Status);
-
-            // 3. 检查是否异常（如被拒绝）
-            if (updatedOrder.Status == "REJECTED")
+            try
             {
-                Logger.LogCritical("策略 {Name} 委托订单被拒绝: {Id}", Name, updatedOrder.OrderId);
-            }
+                // 1. 转换为实体 (自动补全本地上下文)
+                var orderEntity = MapToEntity(response);
 
-            // 4. 调用子类特定的逻辑处理
-            await HandleOrderActionAsync(updatedOrder);
+                // 2. 更新内存字典
+                if (IsFinalStatus(orderEntity.Status.ToString()))
+                {
+                    ActiveOrders.TryRemove(response.OrderId, out _);
+                }
+                else
+                {
+                    ActiveOrders.AddOrUpdate(response.OrderId, orderEntity, (_, _) => orderEntity);
+                }
+
+                // 3. 异步持久化
+                // 此时的 orderEntity 包含了完整的 StrategyId 和 PositionId，
+                // 能够确保数据库记录是完整的。
+                await PersistenceChannel.EnqueueAsync(orderEntity);
+
+                Logger.LogInformation("策略 {Name} 订单更新: {Id} | 状态: {Status}", Name, response.OrderId, response.Status);
+
+                // 4. 执行子类具体的网格逻辑
+                await HandleOrderUpdateAsync(response);
+            }
+            catch (Exception ex)
+            {
+                HandleStrategyException(ex);
+            }
         }
 
         #endregion
 
-        #region 子类扩展点
+        #region 恢复
 
-        /// <summary>
-        /// 由子类实现的具体策略逻辑
-        /// </summary>
-        protected abstract Task HandleTickAsync(TickData tick);
+        public async Task RestoreAsync()
+        {
+            Logger.LogInformation("策略 {Name} 恢复订单状态...", Name);
 
-        /// <summary>
-        /// 子类必须实现或重写：针对订单状态改变后的具体策略行为
-        /// </summary>
-        protected abstract Task HandleOrderActionAsync(OrderResponse order);
+            var activeOrders = await OrderRepo.GetOpenOrdersAsync(Id);
+
+            foreach (var order in activeOrders)
+            {
+                ActiveOrders.TryAdd(order.Id, order);
+            }
+
+            await OnRestoredAsync(activeOrders);
+
+            Logger.LogInformation(
+                "策略 {Name} 恢复完成，加载 {Count} 个活跃订单。",
+                Name,
+                ActiveOrders.Count);
+        }
 
         #endregion
 
-        #region 辅助方法
+        #region 工具方法
 
-        /// <summary>
-        /// 判断订单是否处于终态（不再会发生变化）
-        /// </summary>
-        protected virtual bool IsFinalStatus(string status)
+        protected bool IsFinalStatus(string status)
         {
             return status switch
             {
@@ -152,6 +202,128 @@ namespace Oc.BinGrid.Engine.Strategies
                 "REJECTED" => true,
                 "EXPIRED" => true,
                 _ => false
+            };
+        }
+
+        protected IReadOnlyCollection<TradeOrder> GetActiveOrders()
+            => ActiveOrders.Values.ToList();
+
+        #endregion
+
+        #region 子类扩展点
+
+        /// <summary>
+        /// 子类必须实现行情逻辑
+        /// </summary>
+        protected abstract Task HandleTickAsync(TickData tick);
+
+        /// <summary>
+        /// 子类实现订单更新后的逻辑
+        /// </summary>
+        protected abstract Task HandleOrderUpdateAsync(OrderResponse order);
+
+        /// <summary>
+        /// 启动完成后
+        /// </summary>
+        protected virtual Task OnStartedAsync() => Task.CompletedTask;
+
+        /// <summary>
+        /// 停止前
+        /// </summary>
+        protected virtual Task OnStoppingAsync() => Task.CompletedTask;
+
+        /// <summary>
+        /// 恢复后
+        /// </summary>
+        protected virtual Task OnRestoredAsync(IEnumerable<TradeOrder> restoredOrders)
+            => Task.CompletedTask;
+
+        #endregion
+
+        #region 异常熔断机制
+
+        private void HandleStrategyException(Exception ex)
+        {
+            _exceptionCount++;
+
+            Logger.LogError(ex,
+                "策略 {Name} 异常，第 {Count} 次。",
+                Name,
+                _exceptionCount);
+
+            if (_exceptionCount >= MaxExceptionTolerance)
+            {
+                _state = StrategyState.Faulted;
+
+                Logger.LogCritical(
+                    "策略 {Name} 已进入熔断状态！",
+                    Name);
+            }
+        }
+
+        /// <summary>
+        /// 将交易所瞬时响应映射为领域持久化实体
+        /// </summary>
+        protected virtual TradeOrder MapToEntity(OrderResponse response)
+        {
+            // 1. 获取内存中的上下文记录（保留下单时的 PositionId, StrategyId 等核心基因）
+            ActiveOrders.TryGetValue(response.OrderId, out var existing);
+
+            return new TradeOrder
+            {
+                // --- 标识与关联 ---
+                Id = existing?.Id ?? Guid.NewGuid().ToString("N"),
+                ExchangeOrderId = response.OrderId,
+                ClientOrderId = response.ClientOrderId ?? existing?.ClientOrderId,
+                PositionId = existing?.PositionId,
+                StrategyId = this.Id,
+                StrategyName = this.Name,
+
+                // --- 核心定义 (若 Response 缺失则从现有记录回填) ---
+                Symbol = !string.IsNullOrEmpty(response.Symbol) ? response.Symbol : (existing?.Symbol ?? this.Symbol),
+                Side = !string.IsNullOrEmpty(response.Side) ? response.Side : (existing?.Side ?? "UNKNOWN"),
+                Type = !string.IsNullOrEmpty(response.OrderType) ? response.OrderType : (existing?.Type ?? "LIMIT"),
+
+                // --- 价格与数量控制 ---
+                // 委托价和委托数量通常在下单后不再改变，应优先保留 existing 中的值
+                Price = existing?.Price > 0 ? existing.Price : response.Price,
+                Qty = existing?.Qty > 0 ? existing.Qty : response.Quantity,
+
+                // --- 执行状态 (以 Response 的最新进度为准) ---
+                ExecPrice = response.ExecutedPrice, // 交易所计算的累计均价
+                ExecQty = response.ExecutedQty,     // 交易所计算的累计成交量
+                Status = ParseOrderState(response.Status),
+
+                // --- 财务元数据 ---
+                Fee = response.Fee,
+                //FeeAsset = response.FeeAsset,
+
+                // --- 时间戳 ---
+                // 保持 CreateTime 不变，记录 UpdateTime 为本地当前时间
+                CreateTime = existing?.CreateTime ?? response.UpdateTime,
+                UpdateTime = DateTime.UtcNow,
+
+                // 记录交易所真实的成交/变动时间
+                ExecTime = response.UpdateTime
+            };
+        }
+
+        /// <summary>
+        /// 状态转换适配器：将交易所字符串状态转换为系统枚举
+        /// </summary>
+        private OrderState ParseOrderState(string status)
+        {
+            if (string.IsNullOrWhiteSpace(status)) return OrderState.New;
+
+            return status.ToUpper() switch
+            {
+                "NEW" => OrderState.New,
+                "PARTIALLY_FILLED" => OrderState.PartiallyFilled,
+                "FILLED" => OrderState.Filled,
+                "CANCELED" => OrderState.Canceled,
+                "REJECTED" => OrderState.Rejected,
+                "EXPIRED" => OrderState.Expired,
+                _ => OrderState.New // 默认或抛出异常
             };
         }
 

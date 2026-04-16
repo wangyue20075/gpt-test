@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.Logging;
+using Oc.BinGrid.Domain.Enums;
 using Oc.BinGrid.Domain.Values;
 using Oc.BinGrid.Engine.Interfaces;
 using Oc.BinGrid.Engine.Strategies;
@@ -56,7 +57,7 @@ public class StrategyOrchestrator : ISingletonDependency
         _logger.LogInformation("策略引擎正在启动...");
 
         // 1. 初始化策略
-        await Task.WhenAll(_strategies.Select(s => s.InitializeAsync()));
+        await Task.WhenAll(_strategies.Select(s => s.StartAsync()));
 
         // 2. 构建路由表 (按 Symbol 分组，提高分发效率)
         _strategyRoute = _strategies.ToLookup(s => s.Symbol);
@@ -146,7 +147,7 @@ public class StrategyOrchestrator : ISingletonDependency
 
         foreach (var strategy in targetStrategies)
         {
-            if (!strategy.IsEnabled) continue;
+            if (strategy.State != StrategyState.Running) continue;
 
             try
             {
