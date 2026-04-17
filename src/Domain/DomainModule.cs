@@ -3,6 +3,6 @@
 namespace Oc.BinGrid.Domain;
 
 
-public class GridBinDomainModule : AbpModule
+public class DomainModule : AbpModule
 {
 }

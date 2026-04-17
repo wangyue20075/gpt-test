@@ -7,12 +7,14 @@ using Volo.Abp.DependencyInjection;
 
 namespace Oc.BinGrid.Engine.Execution;
 
-public class OrderMonitorService : IOrderMonitorService, ITransientDependency
+/// <summary>
+/// 订单监控服务：负责挂单的超时撤单、价格偏离撤单以及状态同步
+/// </summary>
+public class OrderMonitorService : IOrderMonitorService, ISingletonDependency
 {
     private readonly ConcurrentDictionary<string, OrderWatchTask> _watchTasks = new();
     private readonly IExchangeGateway _gateway;
     private readonly ILogger<OrderMonitorService> _logger;
-    private readonly DateTime _serviceStartTime = DateTime.UtcNow;
 
     public OrderMonitorService(
         IExchangeGateway gateway,
@@ -22,9 +24,16 @@ public class OrderMonitorService : IOrderMonitorService, ITransientDependency
         _logger = logger;
     }
 
+    /// <summary>
+    /// 注册一个订单进入监控列表
+    /// </summary>
     public void Watch(OrderWatchTask task)
     {
+        if (task == null || string.IsNullOrEmpty(task.OrderId)) return;
+
         _watchTasks[task.OrderId] = task;
+        _logger.LogDebug("已挂载订单监控: {Symbol} | ID: {Id} | 价格: {Price}",
+            task.Symbol, task.OrderId, task.OrderPrice);
     }
 
     /// <summary>
@@ -32,20 +41,23 @@ public class OrderMonitorService : IOrderMonitorService, ITransientDependency
     /// </summary>
     public async Task OnTickAsync(string symbol, decimal currentPrice)
     {
-        // 过滤该币种的活跃任务
-        var tasks = _watchTasks.Values.Where(t => t.Symbol == symbol);
-        foreach (var task in tasks)
+        // 这里的筛选是高效的，只处理当前变动币种的任务
+        var tasksToProcess = _watchTasks.Values
+            .Where(t => t.Symbol == symbol)
+            .ToList();
+
+        foreach (var task in tasksToProcess)
         {
             if (CheckCancelCondition(task, currentPrice, out string reason))
             {
-                // 异步撤单，不阻塞 Tick 循环
+                // 🚀 触发撤单：使用 _ = 异步执行，不阻塞行情管道继续处理后续 Tick
                 _ = ExecuteCancelActionAsync(task, reason);
             }
         }
     }
 
     /// <summary>
-    /// [补偿路径] 主动对账：校准 WebSocket 可能丢失的状态更新
+    /// [兜底路径] 由定时 Worker 驱动：同步交易所真实状态，防止 WebSocket 丢包
     /// </summary>
     public async Task SyncOrderStatusAsync()
     {
@@ -53,24 +65,26 @@ public class OrderMonitorService : IOrderMonitorService, ITransientDependency
 
         _logger.LogDebug("正在执行订单对账，当前监控中任务数: {Count}", _watchTasks.Count);
 
+        // 遍历所有正在监控的订单（包括不同币种）
         foreach (var task in _watchTasks.Values)
         {
             try
             {
-                // 1. 查询交易所真实状态
-                var response = await _gateway.GetOrderAsync(task.Symbol, task.OrderId.ToString());
+                // 1. 调用网关查询最新状态
+                var response = await _gateway.GetOrderAsync(task.Symbol, task.OrderId);
                 if (response == null) continue;
 
-                // 2. 检查是否进入终态 (Filled, Canceled, Rejected...)
+                // 2. 如果订单已经结束（成交、已撤销、已拒绝）
                 if (response.IsFinalized)
                 {
-                    _logger.LogInformation("🔄 对账发现订单 {Id} 已结束，状态: {Status}", task.OrderId, response.Status);
+                    _logger.LogInformation("🔄 发现订单 {Id} 已终结，状态: {Status}", task.OrderId, response.Status);
 
-                    _watchTasks.TryRemove(task.OrderId.ToString(), out _);
-
-                    // 3. 这里的 response 是交易所真实的，包含成交价和状态
-                    // 直接撞回策略逻辑，策略会自动释放锁并更新数据库
-                    await task.OwnerStrategy.OnOrderUpdateAsync(response);
+                    // 移除监控
+                    if (_watchTasks.TryRemove(task.OrderId, out _))
+                    {
+                        // 3. 通知策略实例：更新持仓、基准价并释放锁
+                        await task.OwnerStrategy.OnOrderUpdateAsync(response);
+                    }
                 }
             }
             catch (Exception ex)
@@ -80,57 +94,70 @@ public class OrderMonitorService : IOrderMonitorService, ITransientDependency
         }
     }
 
+    /// <summary>
+    /// 检查是否满足撤单条件
+    /// </summary>
     private bool CheckCancelCondition(OrderWatchTask task, decimal currentPrice, out string reason)
     {
         reason = "";
-        // 1. 超时检查
+        // 1. 超时检查 (针对限价单长时间不成交)
         if (DateTime.UtcNow - task.CreateTime > task.Timeout)
         {
-            reason = $"Timeout(>{task.Timeout.TotalSeconds}s)";
+            reason = $"超时(>{task.Timeout.TotalSeconds}s)";
             return true;
         }
-        // 2. 价格偏离检查
+
+        // 2. 价格偏离检查 (价格跑太远了，挂单已无意义，撤掉重新寻找机会)
         decimal deviation = Math.Abs(currentPrice - task.OrderPrice) / task.OrderPrice;
         if (deviation > task.MaxDeviation)
         {
-            reason = $"Price Deviation({deviation:P2})";
+            reason = $"价格偏离({deviation:P2})";
             return true;
         }
+
         return false;
     }
 
+    /// <summary>
+    /// 执行具体的撤单动作并通知策略
+    /// </summary>
     private async Task ExecuteCancelActionAsync(OrderWatchTask task, string reason)
     {
-        // 防止同一个任务被重复触发撤单
-        if (!_watchTasks.ContainsKey(task.OrderId.ToString())) return;
+        // 原子操作：确保撤单逻辑只触发一次
+        if (!_watchTasks.ContainsKey(task.OrderId)) return;
 
-        _logger.LogWarning("🚨 触发自动撤单 [{Reason}]: Order {Id}", reason, task.OrderId);
+        _logger.LogWarning("🚨 触发自动撤单 [{Reason}]: {Symbol} {Id}", reason, task.Symbol, task.OrderId);
 
         try
         {
-            var success = await _gateway.CancelOrderAsync(task.Symbol, task.OrderId.ToString());
+            var success = await _gateway.CancelOrderAsync(task.Symbol, task.OrderId);
+
+            // 无论撤单成功与否（可能撤单时恰好成交了），
+            // 最终都要通过 SyncOrderStatusAsync 或此处进行状态闭环
             if (success)
             {
-                // 撤单成功后从监控列表移除
-                _watchTasks.TryRemove(task.OrderId.ToString(), out _);
+                if (_watchTasks.TryRemove(task.OrderId, out _))
+                {
+                    // 构造一个撤单成功的响应，通知策略释放 ActiveOrders 锁
+                    var cancelResponse = new OrderResponse(
+                        OrderId: task.OrderId,
+                        Symbol: task.Symbol,
+                        Status: "CANCELED",
+                        Side: task.Side, // 建议在 Task 中记录 Side
+                        Price: task.OrderPrice,
+                        Quantity: 0,
+                        ExecutedQty: 0,
+                        ExecutedPrice: 0,
+                        UpdateTime: DateTime.UtcNow
+                    );
 
-                // 通知策略：订单已撤销（此处构造一个标准的 Response）
-                await task.OwnerStrategy.OnOrderUpdateAsync(new OrderResponse(
-                    OrderId: task.OrderId.ToString(),
-                    Symbol: task.Symbol,
-                    Status: "CANCELED",
-                    Side: "",
-                    Price: task.OrderPrice,
-                    Quantity: 0,
-                    ExecutedQty: 0,
-                    ExecutedPrice: 0,
-                    UpdateTime: DateTime.UtcNow
-                ));
+                    await task.OwnerStrategy.OnOrderUpdateAsync(cancelResponse);
+                }
             }
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "执行撤单动作失败: {Id}", task.OrderId);
+            _logger.LogError(ex, "执行撤单动作失败: {Id}。将在对账循环中再次尝试。", task.OrderId);
         }
     }
 }

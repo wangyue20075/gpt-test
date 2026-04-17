@@ -3,10 +3,11 @@ using Oc.BinGrid.Domain.Enums;
 using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Infrastructure.Db;
 using SqlSugar;
+using Volo.Abp.DependencyInjection;
 
 namespace Oc.BinGrid.Infrastructure.Repositories
 {
-    public class PositionRepository : IPositionRepository
+    public class PositionRepository : IPositionRepository, ITransientDependency
     {
         private readonly SqlSugarContext _context;
 
@@ -58,6 +59,14 @@ namespace Oc.BinGrid.Infrastructure.Repositories
         {
             return await Db.Queryable<GridPosition>()
                 .Where(x => x.StrategyId == strategyId)
+                .OrderBy(x => x.CreateTime, OrderByType.Desc)
+                .ToListAsync();
+        }
+
+        public async Task<IReadOnlyList<GridPosition>> GetOpenPositionsAsync(string strategyId, CancellationToken ct = default)
+        {
+            return await Db.Queryable<GridPosition>()
+                .Where(x => x.StrategyId == strategyId && x.Status == PositionStatusType.Open)
                 .OrderBy(x => x.CreateTime, OrderByType.Desc)
                 .ToListAsync();
         }

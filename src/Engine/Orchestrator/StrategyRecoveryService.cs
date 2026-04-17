@@ -1,62 +1,79 @@
 ﻿using Microsoft.Extensions.Logging;
-using Oc.BinGrid.Domain.Entities;
-using Oc.BinGrid.Domain.Enums;
 using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Domain.ValueObjects;
 using Oc.BinGrid.Engine.Interfaces;
-using Oc.BinGrid.Engine.Strategies;
 using Volo.Abp.DependencyInjection;
 
 namespace Oc.BinGrid.Engine.Orchestrator
 {
+    /// <summary>
+    /// 策略启动恢复数据
+    /// </summary>
     public class StrategyRecoveryService : ITransientDependency
     {
-        private readonly IOrderRepository _orderRepo;
-        private readonly IRepository<TradeOrder, string> _orderRepo2;
         private readonly IOrderMonitorService _monitor;
         private readonly ILogger<StrategyRecoveryService> _logger;
 
         public StrategyRecoveryService(
-            IRepository<TradeOrder, string> orderRepo2,
-            IOrderRepository orderRepo,
             IOrderMonitorService monitor,
             ILogger<StrategyRecoveryService> logger)
         {
-            _orderRepo = orderRepo;
             _monitor = monitor;
             _logger = logger;
         }
 
-        public async Task RecoverActiveTasksAsync(IEnumerable<StrategyBase> strategies)
+        /// <summary>
+        /// 执行完整的系统恢复流程
+        /// </summary>
+        public async Task RecoverAllAsync(IEnumerable<IStrategy> strategies)
         {
-            _logger.LogInformation("正在扫描数据库以恢复未完成的挂单...");
+            var strategyList = strategies.ToList();
+            if (!strategyList.Any()) return;
 
-            // 1. 获取所有逻辑上处于 PENDING/NEW 状态的订单
-            //var pendingOrders = await _orderRepo.GetListAsync(o => o.Status == OrderState.Submitted || o.Status == OrderState.PartiallyFilled);
-            var pendingOrders = await _orderRepo.GetOpenOrdersAsync("");
+            _logger.LogInformation("🚀 启动全局策略恢复序列，目标策略数: {Count}", strategyList.Count);
 
-            foreach (var order in pendingOrders)
+            // 1. 触发策略内部恢复
+            // 这里会调用 StrategyBase.RestoreAsync()
+            // 内部逻辑：从 OrderRepo 加载挂单 -> 从 PositionRepo 加载持仓 -> 填充策略内存栈
+            await Task.WhenAll(strategyList.Select(s => s.StartAsync()));
+
+            // 2. 将挂单接管至监控服务 (OrderMonitorService)
+            // 这一步必须在策略 Start 之后，因为 Start 才会填充 ActiveOrders 字典
+            RegisterActiveOrdersToMonitor(strategyList);
+
+            // 3. 强制执行冷启动对账补偿
+            // 核心：查询交易所 API，校准停机期间发生的成交/撤单
+            _logger.LogInformation("🔄 正在请求交易所 API 进行首轮状态对账...");
+            await _monitor.SyncOrderStatusAsync();
+
+            _logger.LogInformation("✅ 所有策略已完成状态接管并进入运行模式。");
+        }
+
+        /// <summary>
+        /// 将策略已有的挂单重新挂载到监控管道中
+        /// </summary>
+        private void RegisterActiveOrdersToMonitor(List<IStrategy> strategies)
+        {
+            foreach (var strategy in strategies)
             {
-                // 2. 匹配对应的内存策略实例
-                var strategy = strategies.FirstOrDefault(s => s.Id == order.StrategyId);
+                // 通过 StrategyBase 定义的 GetActiveOrders 获取已从 DB 恢复的挂单
+                var orders = strategy.GetActiveOrders();
 
-                if (strategy != null)
+                foreach (var order in orders)
                 {
-                    _logger.LogInformation("恢复策略 {Name} 的挂单监控: {OrderId}", strategy.Name, order.Id);
+                    _logger.LogDebug("接管策略 {Name} 的挂单监控: {OrderId}", strategy.Name, order.ExchangeOrderId);
 
-                    // 3. 重新绑定策略内部的 ActiveOrderId 锁
-                    //strategy.RestoreAsync(order.Id);
-
-                    // 4. 重新挂载到监控服务
                     _monitor.Watch(new OrderWatchTask
                     {
-                        OrderId = order.Id,
+                        OrderId = order.ExchangeOrderId,
                         Symbol = order.Symbol,
+                        Side = order.Side,
                         OrderPrice = order.Price,
-                        CreateTime = order.CreateTime,
-                        OwnerStrategy = strategy,
-                        Timeout = TimeSpan.FromSeconds(60), // 或从订单扩展字段读取
-                        MaxDeviation = 0.01m
+                        Quantity = order.Qty,
+                        CreateTime = order.CreateTime, // 保持原始时间以维持超时逻辑
+                        Timeout = TimeSpan.FromSeconds(60),
+                        MaxDeviation = 0.005m,
+                        OwnerStrategy = strategy // 关联策略实例，确保回调正确
                     });
                 }
             }

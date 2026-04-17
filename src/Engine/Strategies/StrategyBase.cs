@@ -1,5 +1,4 @@
-﻿using CryptoExchange.Net.Interfaces;
-using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Logging;
 using Oc.BinGrid.Core.Abstractions;
 using Oc.BinGrid.Domain.Entities;
 using Oc.BinGrid.Domain.Enums;
@@ -7,17 +6,19 @@ using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Domain.ValueObjects;
 using Oc.BinGrid.Domain.Values;
 using System.Collections.Concurrent;
+using Volo.Abp.DependencyInjection;
 
 namespace Oc.BinGrid.Engine.Strategies
 {
     /// <summary>
     /// 策略基类（线程安全 + 生命周期可控 + 多订单支持）
     /// </summary>
-    public abstract class StrategyBase : IStrategy
+    public abstract class StrategyBase : IStrategy, ISingletonDependency
     {
         protected readonly ILogger Logger;
         protected readonly IExchangeGateway Gateway;
         protected readonly IOrderRepository OrderRepo;
+        protected readonly IPositionRepository PositionRepo;
         protected readonly IPersistenceChannel PersistenceChannel;
 
         private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
@@ -27,8 +28,10 @@ namespace Oc.BinGrid.Engine.Strategies
         private StrategyState _state = StrategyState.Initializing;
 
         protected readonly ConcurrentDictionary<string, TradeOrder> ActiveOrders = new();
+        protected readonly ConcurrentDictionary<string, GridPosition> ActivePositions = new();
+        public decimal LastTickPrice { get; protected set; }
 
-        public string Id { get; protected init; } = Guid.NewGuid().ToString("N")[..8];
+        public string Id { get; protected init; }
         public string Name { get; protected init; }
         public abstract string Symbol { get; }
 
@@ -40,12 +43,14 @@ namespace Oc.BinGrid.Engine.Strategies
             ILogger logger,
             IExchangeGateway gateway,
             IOrderRepository orderRepo,
+            IPositionRepository positionRepo,
             IPersistenceChannel persistenceChannel
             )
         {
             Logger = logger;
             Gateway = gateway;
             OrderRepo = orderRepo;
+            PositionRepo = positionRepo;
             PersistenceChannel = persistenceChannel;
             Name = GetType().Name;
         }
@@ -61,14 +66,15 @@ namespace Oc.BinGrid.Engine.Strategies
                     return;
 
                 _state = StrategyState.Initializing;
-                Logger.LogInformation("策略 {Name} 启动中...", Name);
+                Logger.LogInformation("策略 {Name} ({Id}) 启动中...", Name, Id);
 
+                // 1. 恢复：从 DB 找回挂单和持仓
                 await RestoreAsync();
+                // 2. 钩子：执行子类特定的启动逻辑
                 await OnStartedAsync();
 
                 _state = StrategyState.Running;
-
-                Logger.LogInformation("策略 {Name} 已启动。", Name);
+                Logger.LogInformation("策略 {Name} 启动成功。", Name);
             }
             catch (Exception ex)
             {
@@ -111,14 +117,11 @@ namespace Oc.BinGrid.Engine.Strategies
         /// </summary>
         public async Task OnTickAsync(TickData tick)
         {
-            if (_state != StrategyState.Running)
-                return;
-
-            if (tick.Symbol != Symbol)
-                return;
+            if (_state != StrategyState.Running || tick.Symbol != Symbol) return;
 
             try
             {
+                LastTickPrice = tick.Price;
                 LastTickTime = DateTime.UtcNow;
                 TotalTicksProcessed++;
 
@@ -151,13 +154,11 @@ namespace Oc.BinGrid.Engine.Strategies
                 }
 
                 // 3. 异步持久化
-                // 此时的 orderEntity 包含了完整的 StrategyId 和 PositionId，
-                // 能够确保数据库记录是完整的。
                 await PersistenceChannel.EnqueueAsync(orderEntity);
 
-                Logger.LogInformation("策略 {Name} 订单更新: {Id} | 状态: {Status}", Name, response.OrderId, response.Status);
+                Logger.LogInformation("策略 {Name} 订单 [{Id}] 状态 -> {Status}", Name, response.OrderId, response.Status);
 
-                // 4. 执行子类具体的网格逻辑
+                // 4. 执行子类具体的逻辑
                 await HandleOrderUpdateAsync(response);
             }
             catch (Exception ex)
@@ -172,21 +173,29 @@ namespace Oc.BinGrid.Engine.Strategies
 
         public async Task RestoreAsync()
         {
-            Logger.LogInformation("策略 {Name} 恢复订单状态...", Name);
+            Logger.LogInformation("策略 {Name} 正在执行状态重建...", Name);
 
-            var activeOrders = await OrderRepo.GetOpenOrdersAsync(Id);
-
-            foreach (var order in activeOrders)
+            // 1. 恢复挂单 (Active Orders) -> 解决“不重复下单”
+            var openOrders = await OrderRepo.GetOpenOrdersAsync(Id);
+            ActiveOrders.Clear();
+            foreach (var order in openOrders)
             {
-                ActiveOrders.TryAdd(order.Id, order);
+                ActiveOrders.TryAdd(order.ExchangeOrderId, order);
             }
 
-            await OnRestoredAsync(activeOrders);
+            // 2. 恢复持仓 (Positions) -> 解决“盈利记忆”
+            var openPositions = await PositionRepo.GetOpenPositionsAsync(Id);
+            ActivePositions.Clear();
+            foreach (var pos in openPositions)
+            {
+                ActivePositions.TryAdd(pos.Id, pos);
+            }
 
-            Logger.LogInformation(
-                "策略 {Name} 恢复完成，加载 {Count} 个活跃订单。",
-                Name,
-                ActiveOrders.Count);
+            // 3. 触发子类扩展钩子 (将数据传递给具体策略，如网格策略的价格栈)
+            await OnRestoredAsync(openOrders, openPositions);
+
+            Logger.LogInformation("策略 {Name} 状态重建完成。挂单: {OCount}, 持仓: {PCount}",
+                Name, ActiveOrders.Count, openPositions.Count());
         }
 
         #endregion
@@ -205,8 +214,37 @@ namespace Oc.BinGrid.Engine.Strategies
             };
         }
 
-        protected IReadOnlyCollection<TradeOrder> GetActiveOrders()
+        public IReadOnlyCollection<TradeOrder> GetActiveOrders()
             => ActiveOrders.Values.ToList();
+
+        public IReadOnlyCollection<PositionSnapshot> GetActivePositionSnapshots()
+        {
+            if (ActivePositions.IsEmpty) return Array.Empty<PositionSnapshot>();
+
+            return ActivePositions.Values.Select(pos =>
+            {
+                // 计算浮盈
+                decimal pnl = (LastTickPrice - pos.EntryPrice) * pos.Qty;
+                // 如果是空头 (Short)，公式反转
+                if (pos.Side == "SELL") pnl = (pos.EntryPrice - LastTickPrice) * pos.Qty;
+
+                decimal pnlRate = pos.EntryPrice > 0 ? pnl / (pos.EntryPrice * pos.Qty) : 0;
+
+                return new PositionSnapshot
+                {
+                    PositionId = pos.Id,
+                    StrategyId = this.Id,
+                    Symbol = this.Symbol,
+                    Side = pos.Side,
+                    EntryPrice = pos.EntryPrice,
+                    Quantity = pos.Qty,
+                    CurrentPrice = LastTickPrice,
+                    ProfitLoss = pnl,
+                    ProfitLossRate = pnlRate,
+                    OpenedTime = pos.CreateTime
+                };
+            }).ToList();
+        }
 
         #endregion
 
@@ -235,7 +273,7 @@ namespace Oc.BinGrid.Engine.Strategies
         /// <summary>
         /// 恢复后
         /// </summary>
-        protected virtual Task OnRestoredAsync(IEnumerable<TradeOrder> restoredOrders)
+        protected virtual Task OnRestoredAsync(IEnumerable<TradeOrder> restoredOrders, IEnumerable<GridPosition> restoredPositions)
             => Task.CompletedTask;
 
         #endregion

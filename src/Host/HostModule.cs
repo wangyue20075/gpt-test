@@ -12,11 +12,11 @@ namespace Ocean.BinGrid;
     typeof(EngineModule),
     typeof(InfrastructureModule)
 )]
-public class GridHostModule : AbpModule
+public class HostModule : AbpModule
 {
     public override void ConfigureServices(ServiceConfigurationContext context)
     {
-        context.Services.AddHostedService<TickPollingWorker>();
+        context.Services.AddHostedService<MarketDataWorker>();
         context.Services.AddHostedService<StrategyWorker>();
         context.Services.AddHostedService<PersistenceWorker>();
     }

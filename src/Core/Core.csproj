@@ -1,11 +1,14 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <AssemblyName>Oc.BinGrid.Core</AssemblyName>
-    <RootNamespace>Oc.BinGrid.Core</RootNamespace>
-  </PropertyGroup>
-  <ItemGroup>
-    <Folder Include="Extensions\" />
-    <Folder Include="Utils\" />
-    <Folder Include="Logging\" />
-  </ItemGroup>
+﻿<Project Sdk="Microsoft.NET.Sdk">
+	<PropertyGroup>
+		<AssemblyName>Oc.BinGrid.Core</AssemblyName>
+		<RootNamespace>Oc.BinGrid.Core</RootNamespace>
+	</PropertyGroup>
+	<ItemGroup>
+		<Folder Include="Extensions\" />
+		<Folder Include="Utils\" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<PackageReference Include="Volo.Abp.Core" />
+	</ItemGroup>
 </Project>

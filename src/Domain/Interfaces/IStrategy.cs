@@ -1,4 +1,5 @@
-﻿using Oc.BinGrid.Domain.Enums;
+﻿using Oc.BinGrid.Domain.Entities;
+using Oc.BinGrid.Domain.Enums;
 using Oc.BinGrid.Domain.ValueObjects;
 using Oc.BinGrid.Domain.Values;
 
@@ -64,5 +65,15 @@ namespace Oc.BinGrid.Domain.Interfaces
         /// 系统启动后恢复状态
         /// </summary>
         Task RestoreAsync();
+
+        /// <summary>
+        /// 向外部暴露当前策略控制的活跃订单
+        /// </summary>
+        IReadOnlyCollection<TradeOrder> GetActiveOrders();
+
+        /// <summary>
+        /// 获取当前策略下所有活跃（未平仓）的仓位快照
+        /// </summary>
+        IReadOnlyCollection<PositionSnapshot> GetActivePositionSnapshots();
     }
 }

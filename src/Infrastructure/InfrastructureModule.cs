@@ -1,14 +1,17 @@
 ﻿using Flurl.Http;
 using Microsoft.Extensions.DependencyInjection;
+using Oc.BinGrid.Domain;
 using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Infrastructure.Db;
 using Oc.BinGrid.Infrastructure.Exchanges;
-using Oc.BinGrid.Infrastructure.Repositories;
 using Volo.Abp;
 using Volo.Abp.Modularity;
 
 namespace Oc.BinGrid.Infrastructure
 {
+    [DependsOn(
+        typeof(DomainModule) // 依赖 ABP 的 DDD 模块
+    )]
     public class InfrastructureModule : AbpModule
     {
         public override void ConfigureServices(ServiceConfigurationContext context)
@@ -20,14 +23,6 @@ namespace Oc.BinGrid.Infrastructure
                     // 这里可以配置全局超时、头信息等
                     settings.Timeout = TimeSpan.FromSeconds(10);
                 }));
-
-
-            // 1. 注册上下文（单例）
-            context.Services.AddSingleton<SqlSugarContext>();
-
-            // 2. 注册具体仓储
-            context.Services.AddTransient<IPositionRepository, PositionRepository>();
-            context.Services.AddTransient<IOrderRepository, OrderRepository>();
 
             // 注册网关
             context.Services.AddTransient<IExchangeGateway, BinanceGateway>();

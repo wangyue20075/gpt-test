@@ -9,5 +9,11 @@ namespace Oc.BinGrid.Engine.Interfaces
 
         // 驱动监控逻辑（由编排器调用）
         Task OnTickAsync(string symbol, decimal currentPrice);
+
+        /// <summary>
+        /// 同步订单状态
+        /// </summary>
+        /// <returns></returns>
+        Task SyncOrderStatusAsync();
     }
 }

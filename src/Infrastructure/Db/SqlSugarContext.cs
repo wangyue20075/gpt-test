@@ -1,10 +1,11 @@
 ﻿using Microsoft.Extensions.Configuration;
 using Oc.BinGrid.Domain.Entities;
 using SqlSugar;
+using Volo.Abp.DependencyInjection;
 
 namespace Oc.BinGrid.Infrastructure.Db
 {
-    public class SqlSugarContext
+    public class SqlSugarContext : ISingletonDependency
     {
         public ISqlSugarClient Db { get; }
 

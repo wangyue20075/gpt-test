@@ -1,8 +1,14 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Oc.BinGrid.Domain.Enums;
+using Oc.BinGrid.Domain.Interfaces;
+using Oc.BinGrid.Domain.ValueObjects;
 using Oc.BinGrid.Domain.Values;
 using Oc.BinGrid.Engine.Interfaces;
 using Oc.BinGrid.Engine.Strategies;
+using Oc.BinGrid.Engine.Strategies.Grid;
+using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Volo.Abp.DependencyInjection;
 
@@ -10,154 +16,210 @@ namespace Oc.BinGrid.Engine.Orchestrator;
 
 public class StrategyOrchestrator : ISingletonDependency
 {
-    private readonly Channel<TickData> _tickChannel;
-    private readonly IEnumerable<StrategyBase> _strategies;
+    private readonly ConcurrentDictionary<string, Channel<TickData>> _symbolPipes = new();
+    private readonly ConcurrentDictionary<string, IStrategy> _strategies = new();
     private readonly IOrderMonitorService _monitor;
     private readonly StrategyRecoveryService _recoveryService;
     private readonly ILogger<StrategyOrchestrator> _logger;
-    private bool _isRunning;
+    private readonly IServiceProvider _serviceProvider;
+    private readonly IConfiguration _config;
 
-    private ILookup<string, StrategyBase> _strategyRoute; // 路由表
+    private ILookup<string, IStrategy> _strategyRoute;
+    private bool _isRunning;
+    private readonly CancellationTokenSource _cts = new();
 
     public StrategyOrchestrator(
         ILogger<StrategyOrchestrator> logger,
-        IEnumerable<StrategyBase> strategies,
         IOrderMonitorService monitor,
-        StrategyRecoveryService recoveryService
-        )
+        StrategyRecoveryService recoveryService,
+        IServiceProvider serviceProvider,
+        IConfiguration config)
     {
         _logger = logger;
-        _strategies = strategies;
         _monitor = monitor;
         _recoveryService = recoveryService;
-
-        // 优化配置
-        _tickChannel = Channel.CreateUnbounded<TickData>(new UnboundedChannelOptions
-        {
-            SingleReader = true,
-            AllowSynchronousContinuations = true
-        });
+        _serviceProvider = serviceProvider;
+        _config = config;
+        _strategyRoute = new Dictionary<string, IStrategy>().ToLookup(s => s.Key, s => s.Value);
     }
 
-    /// <summary>
-    /// 启动引擎，并确保所有策略完成初始化
-    /// </summary>
     public async Task StartAsync(CancellationToken cancellationToken = default)
     {
-        _logger.LogInformation("检测到 {Count} 个已注册策略。", _strategies.Count());
+        if (_isRunning) return;
 
+        _logger.LogInformation("🚀 策略引擎启动中...");
+
+        // 1. 加载配置并实例化
+        await LoadStrategiesFromConfigAsync();
         if (!_strategies.Any())
         {
-            _logger.LogWarning("警告：未发现任何有效策略，引擎将空转！");
+            _logger.LogWarning("未发现有效策略配置，引擎空转。");
             return;
         }
 
-        if (_isRunning) return;
+        // 2. 预构建路由表，提升 Processor 查找速度
+        _strategyRoute = _strategies.Values.ToLookup(s => s.Symbol);
 
-        _logger.LogInformation("策略引擎正在启动...");
+        // 3. 执行统一恢复与启动序列
+        // 注意：RecoverAllAsync 内部应负责调用策略的 StartAsync
+        await _recoveryService.RecoverAllAsync(_strategies.Values.Cast<StrategyBase>());
 
-        // 1. 初始化策略
-        await Task.WhenAll(_strategies.Select(s => s.StartAsync()));
+        // 4. 开启策略内部逻辑
+        //await Task.WhenAll(_strategies.Values.Select(s => s.StartAsync()));
 
-        // 2. 构建路由表 (按 Symbol 分组，提高分发效率)
-        _strategyRoute = _strategies.ToLookup(s => s.Symbol);
-
-        // 3. 重要：恢复挂单监控
-        // 假设你有一个 RecoveryService，或者在策略初始化中已经处理了
-        await _recoveryService.RecoverActiveTasksAsync(_strategies);
+        // 启动定时监控打印任务
+        await Task.Run(() => StartPositionReportingLoopAsync(_cts.Token));
 
         _isRunning = true;
-        _ = Task.Run(async () => await ProcessLoopAsync(cancellationToken), cancellationToken);
-
-        _logger.LogInformation("策略引擎已就绪，正在监听行情流...");
+        _logger.LogInformation("✅ 引擎就绪。当前运行策略数: {Count}", _strategies.Count);
     }
 
-    /// <summary>
-    /// 停止引擎，优雅关闭通道
-    /// </summary>
     public async Task StopAsync()
     {
-        _tickChannel.Writer.TryComplete();
+        _logger.LogInformation("正在关闭策略引擎...");
+        _isRunning = false;
+        _cts.Cancel(); // 通知所有处理器停止
 
-        // 优雅等待消费者处理完剩余 Tick (可选)
-        int retry = 0;
-        while (_isRunning && retry++ < 10)
+        // 1. 关闭所有管道写入器
+        foreach (var pipe in _symbolPipes.Values)
         {
-            await Task.Delay(500);
+            pipe.Writer.TryComplete();
         }
 
-        foreach (var strategy in _strategies)
-        {
-            await strategy.StopAsync();
-        }
+        // 2. 停止所有策略
+        await Task.WhenAll(_strategies.Values.Select(s => s.StopAsync()));
 
-        _logger.LogInformation("策略引擎已停止。");
+        _logger.LogInformation("策略引擎已安全停止。");
     }
 
     /// <summary>
-    /// 价格更新接口，外部调用（如行情服务）将 Tick 数据推送到引擎
+    /// 价格更新入口：负责按 Symbol 将数据分发到对应管道
     /// </summary>
     public void OnPriceUpdate(TickData tick)
     {
         if (!_isRunning) return;
 
-        // 极速入队
-        if (!_tickChannel.Writer.TryWrite(tick))
+        // 获取该币种独占的管道，不存在则创建
+        var channel = _symbolPipes.GetOrAdd(tick.Symbol, symbol =>
         {
-            _logger.LogWarning("队列溢出或已关闭，Tick 丢弃: {Symbol} {Price}", tick.Symbol, tick.Price);
+            var pipe = Channel.CreateUnbounded<TickData>(new UnboundedChannelOptions
+            {
+                // 保证单币种时序严格性
+                SingleReader = true,
+                // 避免在写入线程直接跑后续逻辑，提高分发速度
+                AllowSynchronousContinuations = false
+            });
+
+            // 为该管道启动独立消费者
+            _ = Task.Run(() => StartSymbolProcessorAsync(symbol, pipe.Reader), _cts.Token);
+            return pipe;
+        });
+
+        channel.Writer.TryWrite(tick);
+    }
+
+    /// <summary>
+    /// 持仓审计报告：每 5 分钟打印一次当前所有策略的持仓情况，帮助监控整体风险暴露
+    /// </summary>
+    private async Task StartPositionReportingLoopAsync(CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromMinutes(5), ct);
+
+                _logger.LogInformation("--- 📊 全局头寸审计报告 [{Time}] ---", DateTime.Now.ToString("T"));
+
+                foreach (var strategy in _strategies.Values)
+                {
+                    var positions = strategy.GetActivePositionSnapshots();
+                    if (!positions.Any()) continue;
+
+                    _logger.LogInformation("【策略: {Name} | 交易对: {Symbol}】", strategy.Name, strategy.Symbol);
+
+                    // 打印每一层的明细
+                    foreach (var pos in positions)
+                    {
+                        _logger.LogInformation(
+                            "  └─ 层级: {Id} | 入场: {Entry:F2} | 现价: {Cur:F2} | 盈亏: {Pnl:F2} ({Rate:P2})",
+                            pos.PositionId, pos.EntryPrice, pos.CurrentPrice, pos.ProfitLoss, pos.ProfitLossRate);
+                    }
+
+                    // 汇总该策略的总头寸
+                    decimal totalPnl = positions.Sum(p => p.ProfitLoss);
+                    _logger.LogInformation("  TOTAL => 持仓层数: {Count} | 总浮盈: {TotalPnl:F2}", positions.Count, totalPnl);
+                }
+                _logger.LogInformation("------------------------------------------");
+            }
+            catch (Exception ex) { _logger.LogError(ex, "审计报表任务异常"); }
         }
     }
+
 
     #region 内部方法
 
-    private async Task ProcessLoopAsync(CancellationToken ct)
+    /// <summary>
+    /// 币种处理器：ETH 逻辑在这里跑，DOGE 逻辑在另一个线程跑，互不干扰
+    /// </summary>
+    private async Task StartSymbolProcessorAsync(string symbol, ChannelReader<TickData> reader)
     {
+        _logger.LogInformation("⚡ [管道开启] {Symbol} 处理器", symbol);
+        // 获取该币种的所有策略（利用预构建的 Lookup 达到 O(1) 性能）
+        var targets = _strategyRoute[symbol].ToList();
+
         try
         {
-            // 使用更高效的读取方式
-            while (await _tickChannel.Reader.WaitToReadAsync(ct))
+            while (await reader.WaitToReadAsync(_cts.Token))
             {
-                while (_tickChannel.Reader.TryRead(out var tick))
+                while (reader.TryRead(out var tick))
                 {
-                    // 1. 驱动订单监控 (检查是否需要撤单)
-                    _ = _monitor.OnTickAsync(tick.Symbol, tick.Price);
+                    // A. 监控层对账（即使策略崩溃，监控也应尝试工作）
+                    try
+                    {
+                        // Monitor 内部通常不需要 await，因为它是基于内存状态判断撤单
+                        _ = _monitor.OnTickAsync(tick.Symbol, tick.Price);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "监控检查异常: {Symbol}", symbol);
+                    }
 
-                    await DispatchToStrategiesAsync(tick);
+                    // B. 执行该币种下的所有策略
+                    foreach (var strategy in targets)
+                    {
+                        if (strategy.State == StrategyState.Faulted) continue; // 跳过熔断的策略
+
+                        try
+                        {
+                            await strategy.OnTickAsync(tick);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "策略执行异常: {Id}", strategy.Id);
+                        }
+                    }
                 }
             }
         }
-        catch (OperationCanceledException)
-        {
-            _logger.LogWarning("策略引擎收到停止指令。");
-        }
+        catch (OperationCanceledException) { }
         catch (Exception ex)
         {
-            _logger.LogCritical(ex, "策略引擎崩溃！请检查底层通道状态。");
-        }
-        finally
-        {
-            _isRunning = false;
+            _logger.LogCritical(ex, "致命错误：币种管道 {Symbol} 已崩溃", symbol);
         }
     }
 
-    private async Task DispatchToStrategiesAsync(TickData tick)
+    private async Task LoadStrategiesFromConfigAsync()
     {
-        // 只分发给订阅了该 Symbol 的策略
-        var targetStrategies = _strategyRoute[tick.Symbol];
+        var gridConfigs = _config.GetSection("Strategies").Get<List<GridSetting>>();
+        if (gridConfigs == null) return;
 
-        foreach (var strategy in targetStrategies)
+        foreach (var setting in gridConfigs)
         {
-            if (strategy.State != StrategyState.Running) continue;
-
-            try
+            var strategy = ActivatorUtilities.CreateInstance<GridStrategy>(_serviceProvider, setting);
+            if (!_strategies.TryAdd(strategy.Id, strategy))
             {
-                // 如果对延迟极度敏感，且策略间无资源争夺，可考虑不 await
-                // 但为了逻辑顺序性，await 是最稳妥的
-                await strategy.OnTickAsync(tick);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "策略 {Name} 执行异常", strategy.Name);
+                _logger.LogWarning("忽略重复策略: {Id}", strategy.Id);
             }
         }
     }

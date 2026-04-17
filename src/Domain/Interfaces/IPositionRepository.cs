@@ -36,10 +36,17 @@ namespace Oc.BinGrid.Domain.Interfaces
             CancellationToken ct = default);
 
         /// <summary>
+        /// 查询所有未关闭持仓
+        /// </summary>
+        Task<IReadOnlyList<GridPosition>> GetOpenPositionsAsync(string strategyId, CancellationToken ct = default);
+
+        /// <summary>
         /// 查询某策略历史持仓
         /// </summary>
         Task<IReadOnlyList<GridPosition>> GetHistoryByStrategyAsync(
             string strategyId,
             CancellationToken ct = default);
+
+
     }
 }

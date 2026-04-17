@@ -27,7 +27,7 @@ public class BinanceGateway : IExchangeGateway
 
     #region 1. 行情与公共数据
 
-    public async Task<TickData> GetLatestTickAsync(string symbol)
+    public async Task<TickData?> GetLatestTickAsync(string symbol)
     {
         var result = await _baseUrl
             .AppendPathSegment("/api/v3/ticker/price")

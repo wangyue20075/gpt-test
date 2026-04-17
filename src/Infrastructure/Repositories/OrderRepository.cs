@@ -3,10 +3,11 @@ using Oc.BinGrid.Domain.Enums;
 using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Infrastructure.Db;
 using SqlSugar;
+using Volo.Abp.DependencyInjection;
 
 namespace Oc.BinGrid.Infrastructure.Repositories
 {
-    public class OrderRepository : Repository<TradeOrder, string>, IOrderRepository
+    public class OrderRepository : Repository<TradeOrder, string>, IOrderRepository, ITransientDependency
     {
         public OrderRepository(SqlSugarContext context) : base(context.Db)
         {

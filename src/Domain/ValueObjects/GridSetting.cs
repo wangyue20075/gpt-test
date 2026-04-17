@@ -12,6 +12,7 @@
     /// <param name="CallbackRate">止盈回撤比例 (如 0.005 表示从高点回落 0.5% 平仓)</param>
     /// <param name="ReboundRate">买入反弹比例 (如 0.002 表示跌破网格线后反弹 0.2% 才买入)</param>
     public record GridSetting(
+        string Id,
         string Symbol,
         decimal InitialPrice,
         decimal GridGap,

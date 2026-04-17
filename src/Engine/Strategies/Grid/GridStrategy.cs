@@ -1,5 +1,6 @@
 ﻿using Microsoft.Extensions.Logging;
 using Oc.BinGrid.Core.Abstractions;
+using Oc.BinGrid.Domain.Entities;
 using Oc.BinGrid.Domain.Interfaces;
 using Oc.BinGrid.Domain.ValueObjects;
 using Oc.BinGrid.Domain.Values;
@@ -27,14 +28,16 @@ namespace Oc.BinGrid.Engine.Strategies.Grid
             GridSetting setting,
             IExchangeGateway gateway,
             IOrderRepository orderRepo,
+            IPositionRepository positionRepo,
             IPersistenceChannel persistenceChannel,
             IOrderMonitorService monitor
             )
-            : base(logger, gateway, orderRepo, persistenceChannel)
+            : base(logger, gateway, orderRepo, positionRepo, persistenceChannel)
         {
             _setting = setting;
             _monitor = monitor;
             _currentBasePrice = setting.InitialPrice;
+            Id = _setting.Id;
             Name = $"Grid_{setting.Symbol}_{setting.GridGap}";
         }
 
@@ -81,6 +84,35 @@ namespace Oc.BinGrid.Engine.Strategies.Grid
             // 重置观察窗，等待下一轮 Tick 重新触发
             _observedBottom = null;
             _observedHigh = null;
+        }
+
+        /// <summary>
+        /// 响应基类的恢复指令：明确从持仓实体中恢复价格栈
+        /// </summary>
+        /// <param name="restoredOrders"></param>
+        /// <param name="restoredPositions"></param>
+        /// <returns></returns>
+        protected override async Task OnRestoredAsync(IEnumerable<TradeOrder> restoredOrders, IEnumerable<GridPosition> restoredPositions)
+        {
+            // 1. 核心：从持仓表（Position）恢复价格栈，而不是从订单恢复
+            _openedPrices.Clear();
+            var prices = restoredPositions
+                .OrderBy(p => p.EntryTime)
+                .Select(p => p.EntryPrice)
+                .ToList();
+
+            _openedPrices.AddRange(prices);
+
+            // 更新当前网格基准价
+            if (_openedPrices.Any())
+            {
+                _currentBasePrice = _openedPrices.Last();
+            }
+
+            // 2. 挂单监控的接管交由 StrategyRecoveryService 或在此处处理
+            // 建议：在此处仅做数据对齐，监控注册由外层 RecoveryService 统一调用 RegisterMonitor
+
+            Logger.LogInformation("{Name} 价格栈重建完毕，当前持仓层数: {Count}", Name, _openedPrices.Count);
         }
 
         #region 开仓逻辑 - 动态反弹买入
@@ -158,18 +190,20 @@ namespace Oc.BinGrid.Engine.Strategies.Grid
                 var orderEntity = MapToEntity(order);
 
                 // 1. 设置基类锁，防止重入
-                ActiveOrders.TryAdd(order.OrderId, orderEntity);   
+                ActiveOrders.TryAdd(order.OrderId, orderEntity);
 
                 // 2. 注册到监控服务 (超时或价格跑太远则撤单)
                 _monitor.Watch(new OrderWatchTask
                 {
                     OrderId = order.OrderId,
-                    Symbol = Symbol,
+                    Symbol = this.Symbol,
+                    Side = side,
                     OrderPrice = price,
+                    Quantity = order.Quantity,
                     CreateTime = DateTime.UtcNow,
-                    OwnerStrategy = this,
-                    Timeout = TimeSpan.FromSeconds(60), // 可从 Setting 读取
-                    MaxDeviation = 0.01m                // 偏离 1% 撤单
+                    Timeout = TimeSpan.FromSeconds(60),
+                    MaxDeviation = 0.005m, // 0.5% 偏离即撤单
+                    OwnerStrategy = this   // 传入当前策略实例
                 });
             }
         }

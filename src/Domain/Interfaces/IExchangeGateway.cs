@@ -14,7 +14,7 @@ namespace Oc.BinGrid.Domain.Interfaces
         /// <summary>
         /// 获取最新深度/价格 (用于冷启动或轮询)
         /// </summary>
-        Task<TickData> GetLatestTickAsync(string symbol);
+        Task<TickData?> GetLatestTickAsync(string symbol);
 
         /// <summary>
         /// 获取历史 K 线
